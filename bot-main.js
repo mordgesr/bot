@@ -4,6 +4,9 @@ const RSSParser = require('rss-parser');
 const xml2js = require('xml2js'); // Для парсинга XML
 
 // Создаем экземпляр бота, используя токен, который хранится в переменной окружения BOT_TOKEN
+if (!process.env.BOT_TOKEN) {
+    throw new Error('BOT_TOKEN is not set');
+}
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
 // Определяем обработчик команды /start, который отправляет приветственное сообщение
@@ -32,8 +35,12 @@ bot.action('weather_krasnodar', async (ctx) => {
 // Функция для отправки погоды
 async function sendWeather(ctx, city) {
     const apiKey = process.env.OPENWEATHERMAP_API_KEY;
+    if (!apiKey) {
+        ctx.reply('Извини, ключ OpenWeatherMap не настроен.');
+        return;
+    }
     try {
-        const response = await axios.get(`https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(city)}&appid=${apiKey}&units=metric&lang=ru`);
+        const response = await axios.get(`https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(city)}&appid=${apiKey}&units=metric&lang=ru`, { timeout: 10000 });
         const weather = response.data;
         const weatherMessage = `Погода в ${weather.name}:\nТемпература: ${weather.main.temp}°C\nПогодные условия: ${weather.weather[0].description}`;
 
@@ -53,7 +60,7 @@ bot.command('news', async (ctx) => {
         { name: 'AdIndex', url: 'https://adindex.ru/news/news.rss' }
     ];
 
-    for (const feed of feeds) {
+    await Promise.all(feeds.map(async (feed) => {
         try {
             const feedData = await rssParser.parseURL(feed.url);
             const newsItems = feedData.items.slice(0, 5); // Получаем последние 5 новостей из текущего фида
@@ -71,44 +78,38 @@ bot.command('news', async (ctx) => {
             console.error(`Ошибка при получении новостей из фида ${feed.name}: ${feedError.message}`);
             ctx.reply(`Извини, произошла ошибка при получении новостей из ${feed.name}.`);
         }
-    }
+    }));
 });
 
 // Определяем обработчик команды /currency для получения курса валют
 bot.command('currency', async (ctx) => {
     try {
-        const response = await axios.get('https://www.cbr.ru/scripts/XML_daily.asp');
+        const response = await axios.get('https://www.cbr.ru/scripts/XML_daily.asp', { timeout: 10000 });
         const xml = response.data;
 
         // Парсим XML в JSON
-        xml2js.parseString(xml, (err, result) => {
-            if (err) {
-                console.error(`Ошибка при парсинге XML: ${err.message}`);
-                ctx.reply('Извини, я не смог получить данные о курсах валют.');
-                return;
+        const result = await xml2js.parseStringPromise(xml);
+
+        const currencies = result.ValCurs.Valute;
+        let currencyMessage = 'Текущие курсы валют по отношению к рублю:\n\n';
+
+        // Список кодов валют, которые нам нужны
+        const targetCurrencies = ['USD', 'EUR', 'CNY', 'TRY'];
+
+        currencies.forEach(currency => {
+            const charCode = currency.CharCode[0];
+            if (targetCurrencies.includes(charCode)) {
+                const value = parseFloat(currency.Value[0].replace(',', '.'));
+                const nominal = parseInt(currency.Nominal[0]);
+                currencyMessage += `${charCode}: ${value / nominal} руб.\n`;
             }
-
-            const currencies = result.ValCurs.Valute;
-            let currencyMessage = 'Текущие курсы валют по отношению к рублю:\n\n';
-
-            // Список кодов валют, которые нам нужны
-            const targetCurrencies = ['USD', 'EUR', 'CNY', 'TRY'];
-
-            currencies.forEach(currency => {
-                const charCode = currency.CharCode[0];
-                if (targetCurrencies.includes(charCode)) {
-                    const value = parseFloat(currency.Value[0].replace(',', '.'));
-                    const nominal = parseInt(currency.Nominal[0]);
-                    currencyMessage += `${charCode}: ${value / nominal} руб.\n`;
-                }
-            });
-
-            if (currencyMessage === 'Текущие курсы валют по отношению к рублю:\n\n') {
-                currencyMessage = 'Извини, я не нашел данные для выбранных валют.';
-            }
-
-            ctx.reply(currencyMessage);
         });
+
+        if (currencyMessage === 'Текущие курсы валют по отношению к рублю:\n\n') {
+            currencyMessage = 'Извини, я не нашел данные для выбранных валют.';
+        }
+
+        ctx.reply(currencyMessage);
     } catch (error) {
         console.error(`Ошибка при получении данных о курсах валют: ${error.message}`);
         ctx.reply('Извини, я не смог получить данные о курсах валют.');
@@ -122,10 +123,18 @@ bot.on('text', (ctx) => {
 
 // Экспортируем функцию-обработчик для Yandex Cloud Function
 module.exports.handler = async function (event, context) {
-    const message = JSON.parse(event.body);
-    await bot.handleUpdate(message);
-    return {
-        statusCode: 200,
-        body: '',
-    };
+    try {
+        const message = JSON.parse(event.body);
+        await bot.handleUpdate(message);
+        return {
+            statusCode: 200,
+            body: '',
+        };
+    } catch (err) {
+        console.error(`Ошибка при обработке обновления: ${err.message}`);
+        return {
+            statusCode: 200,
+            body: '',
+        };
+    }
 };
